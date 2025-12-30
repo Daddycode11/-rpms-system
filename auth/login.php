@@ -4,67 +4,74 @@ session_start();
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
-
 require '../vendor/autoload.php';
 
 $error = "";
 $rememberEmail = $_COOKIE['remember_email'] ?? "";
 $roleFromUrl = $_GET['role'] ?? '';
 
+// --- Handle POST Login ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email = trim($_POST['email']);
     $password = $_POST['password'];
     $roleSelected = $_POST['role'];
 
-    // Remember Me
+    // --- Remember Me ---
     if (isset($_POST['remember'])) {
-        setcookie("remember_email", $email, time() + (86400*30), "/");
+        setcookie("remember_email", $email, time() + 86400*30, "/");
     } else {
         setcookie("remember_email", "", time() - 3600, "/");
     }
 
-    // Fetch user
+    // --- Fetch user ---
     $stmt = $pdo->prepare("SELECT * FROM users WHERE email=? LIMIT 1");
     $stmt->execute([$email]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // Guaranteed Admin
-    if ($email === 'admin@rpms.com') {
-        if (!$user) {
-            $hashed = password_hash('Admin123!', PASSWORD_DEFAULT);
-            $insert = $pdo->prepare("INSERT INTO users (role, first_name, last_name, email, password, status, created_at, two_factor_enabled) 
-                                     VALUES ('admin','System','Admin','admin@rpms.com', ?, 'active', NOW(), 1)");
-            $insert->execute([$hashed]);
-            $user = [
-                'id' => $pdo->lastInsertId(),
-                'role' => 'admin',
-                'first_name' => 'System',
-                'last_name' => 'Admin',
-                'password' => $hashed,
-                'status' => 'active',
-                'two_factor_enabled' => 1
-            ];
-            $password = 'Admin123!';
-        }
+    // --- Auto-create Admin if not exists ---
+    $adminEmails = ['rpmsa00@gmail.com'];
+    if (in_array($email, $adminEmails) && !$user) {
+        $hashed = password_hash('Admin123!', PASSWORD_DEFAULT);
+        $insert = $pdo->prepare("INSERT INTO users 
+            (role, first_name, last_name, email, password, status, created_at, two_factor_enabled)
+            VALUES ('admin', 'System', 'Admin', ?, ?, 'active', NOW(), 1)");
+        $insert->execute([$email, $hashed]);
+
+        $user = [
+            'id' => $pdo->lastInsertId(),
+            'role' => 'admin',
+            'first_name' => 'System',
+            'last_name' => 'Admin',
+            'password' => $hashed,
+            'status' => 'active',
+            'two_factor_enabled' => 1
+        ];
     }
 
-    // Verify credentials
-    if ($user && password_verify($password, $user['password']) && $user['status']==='active' && $user['role']===$roleSelected) {
+    // --- Verify Credentials ---
+    if ($user && password_verify($password, $user['password']) && $user['status'] === 'active') {
+
+        // --- Role validation ---
+        if ($user['role'] !== 'admin' && $user['role'] !== $roleSelected) {
+            $error = "Invalid email, password, or role";
+            goto render_form;
+        }
+
+        // --- Set session ---
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['role'] = $user['role'];
         $_SESSION['first_name'] = $user['first_name'];
         $_SESSION['last_name'] = $user['last_name'] ?? '';
 
-        // Admin OTP
+        // --- Admin OTP ---
         if ($user['role'] === 'admin' && $user['two_factor_enabled']) {
             $otp = rand(100000, 999999);
             $expires = date('Y-m-d H:i:s', strtotime('+5 minutes'));
 
-            // Save OTP
             $stmt = $pdo->prepare("UPDATE users SET otp_code=?, otp_expires=? WHERE id=?");
             $stmt->execute([$otp, $expires, $user['id']]);
 
-            // Send OTP via PHPMailer
+            // --- Send OTP via PHPMailer ---
             $mail = new PHPMailer(true);
             try {
                 $mail->isSMTP();
@@ -77,11 +84,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $mail->setFrom('rpmsa00@gmail.com', 'RPMS Admin');
                 $mail->addAddress($user['email']);
-
                 $mail->isHTML(false);
                 $mail->Subject = 'Your RPMS Admin OTP';
                 $mail->Body    = "Your OTP code is: $otp. Expires in 5 minutes.";
-
                 $mail->send();
             } catch (Exception $e) {
                 $error = "Mailer Error: {$mail->ErrorInfo}";
@@ -91,20 +96,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
-        // Non-admin
+        // --- Non-admin Redirect ---
         switch ($user['role']) {
             case 'collector':
                 header("Location: ../collector/dashboard.php");
-                break;
+                exit;
             case 'vendor':
                 header("Location: ../vendor/dashboard.php");
-                break;
+                exit;
+            case 'admin':
+                header("Location: ../admin/dashboard.php");
+                exit;
         }
-        exit;
     } else {
         $error = "Invalid email, password, or role";
     }
 }
+
+render_form:
 ?>
 
 <!-- HTML LOGIN FORM -->

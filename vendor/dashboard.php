@@ -7,7 +7,9 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'vendor') {
     exit;
 }
 
-// --- Get vendor info ---
+/* =========================
+   FETCH VENDOR INFO
+========================= */
 $vendorStmt = $pdo->prepare("
     SELECT v.id AS vendor_id, v.stall_number, v.monthly_rent, s.section_name,
            u.first_name, u.last_name
@@ -20,212 +22,236 @@ $vendorStmt->execute([$_SESSION['user_id']]);
 $vendor = $vendorStmt->fetch(PDO::FETCH_ASSOC);
 $vendor_id = $vendor['vendor_id'];
 
-// --- Fetch payments ---
-$paymentsStmt = $pdo->prepare("SELECT * FROM payments WHERE vendor_id = ? ORDER BY payment_date ASC");
+/* =========================
+   FETCH PAYMENTS
+========================= */
+$paymentsStmt = $pdo->prepare("
+    SELECT * FROM payments 
+    WHERE vendor_id = ?
+    ORDER BY payment_date ASC
+");
 $paymentsStmt->execute([$vendor_id]);
 $payments = $paymentsStmt->fetchAll(PDO::FETCH_ASSOC);
 
-// --- Calculate totals ---
+/* =========================
+   COMPUTATIONS
+========================= */
 $total_paid = 0;
 $payment_dates = [];
 $payment_amounts = [];
+
 foreach ($payments as $p) {
-    $amount = $p['amount_paid'] - $p['discount'] + $p['penalty'];
-    $total_paid += $amount;
+    $net = $p['amount_paid'] - $p['discount'] + $p['penalty'];
+    $total_paid += $net;
     $payment_dates[] = $p['payment_date'];
-    $payment_amounts[] = $amount;
+    $payment_amounts[] = $net;
 }
+
 $outstanding_balance = max(0, $vendor['monthly_rent'] - $total_paid);
+
+/* =========================
+   DUE DATE & STATUS
+========================= */
+$today = new DateTime();
+$lastPaymentDate = !empty($payments)
+    ? new DateTime(end($payments)['payment_date'])
+    : new DateTime('first day of this month');
+
+$nextDueDate = (clone $lastPaymentDate)->modify('+1 month');
+$graceEnd = (clone $nextDueDate)->modify('+5 days');
+
+$isOverdue = $today > $graceEnd && $outstanding_balance > 0;
+$statusLabel = $isOverdue ? 'OVERDUE' : 'ON-TIME';
+$statusClass = $isOverdue ? 'danger' : 'success';
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vendor Dashboard | RPMS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<?php include $_SERVER['DOCUMENT_ROOT'].'/rpms-system/includes/favicon.php'; ?>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet">
+
 <style>
-body { font-family: 'Poppins', sans-serif; background: #f4f6f9; }
-.card { border-radius: 12px; }
-.table th, .table td { vertical-align: middle; }
+body {
+    font-family: 'Poppins', sans-serif;
+    background: #f5f7fb;
+}
+.card {
+    border-radius: 14px;
+}
+.metric-value {
+    font-size: 1.8rem;
+    font-weight: 600;
+}
+.mobile-payment { display:none; }
+
+@media(max-width:768px){
+    table{ display:none; }
+    .mobile-payment{ display:block; }
+}
 </style>
 </head>
+
 <body>
-<?php include __DIR__ . '/vendor_navbar.php'; ?>
+<?php include __DIR__.'/vendor_navbar.php'; ?>
 
 <div class="container mt-5">
-    <h2 class="mb-4">Welcome, <?= htmlspecialchars($vendor['first_name']); ?></h2>
 
-    <!-- Vendor Info Cards -->
-    <div class="row mb-4">
-        <div class="col-6 col-md-3 mb-3">
-            <div class="card shadow-sm text-white bg-primary text-center p-3">
-                <h5 class="card-title">Stall Number</h5>
-                <p class="card-text fs-2"><?= htmlspecialchars($vendor['stall_number']); ?></p>
-            </div>
-        </div>
-        <div class="col-6 col-md-3 mb-3">
-            <div class="card shadow-sm text-white bg-success text-center p-3">
-                <h5 class="card-title">Section</h5>
-                <p class="card-text fs-2"><?= htmlspecialchars($vendor['section_name']); ?></p>
-            </div>
-        </div>
-        <div class="col-6 col-md-3 mb-3">
-            <div class="card shadow-sm text-white bg-warning text-center p-3">
-                <h5 class="card-title">Total Paid</h5>
-                <p class="card-text fs-2">₱<?= number_format($total_paid, 2); ?></p>
-            </div>
-        </div>
-        <div class="col-6 col-md-3 mb-3">
-            <div class="card shadow-sm text-white bg-danger text-center p-3">
-                <h5 class="card-title">Outstanding Balance</h5>
-                <p class="card-text fs-2" id="outstandingBalance">₱<?= number_format($outstanding_balance, 2); ?></p>
-            </div>
+<!-- ================= HEADER ================= -->
+<h2>Welcome back, <?= htmlspecialchars($vendor['first_name']); ?> 👋</h2>
+<p class="text-muted">Stall <?= $vendor['stall_number']; ?> · <?= $vendor['section_name']; ?></p>
+
+<!-- ================= METRICS ================= -->
+<div class="row mb-4">
+    <div class="col-md-3 col-6 mb-3">
+        <div class="card p-3 text-center bg-primary text-white">
+            <div>Monthly Rent</div>
+            <div class="metric-value">₱<?= number_format($vendor['monthly_rent'],2); ?></div>
         </div>
     </div>
 
-    <!-- Payment Submission Card -->
-    <div class="card mb-4 shadow-sm">
-        <div class="card-body">
-            <h5 class="mb-3">Submit Payment</h5>
-            <form id="paymentForm">
-                <div class="row g-3">
-                    <div class="col-md-4">
-                        <label>Amount Paid</label>
-                        <input type="number" step="0.01" name="amount_paid" id="amount_paid" class="form-control" required>
-                    </div>
-                    <div class="col-md-4">
-                        <label>Discount</label>
-                        <input type="number" step="0.01" name="discount" id="discount" class="form-control" value="0">
-                    </div>
-                    <div class="col-md-4">
-                        <label>Penalty</label>
-                        <input type="number" step="0.01" name="penalty" id="penalty" class="form-control" value="0">
-                    </div>
-                </div>
-                <div class="mt-3">
-                    <h5>Total: ₱<span id="totalCalc">0.00</span></h5>
-                </div>
-                <div class="mt-2">
-                    <button type="submit" class="btn btn-success">Submit Payment & Print Receipt</button>
-                </div>
-            </form>
-            <div class="mt-2" id="paymentMsg"></div>
+    <div class="col-md-3 col-6 mb-3">
+        <div class="card p-3 text-center bg-success text-white">
+            <div>Total Paid</div>
+            <div class="metric-value">₱<?= number_format($total_paid,2); ?></div>
         </div>
     </div>
 
-    <!-- Payment Chart Card -->
-    <div class="card mb-4 shadow-sm">
-        <div class="card-body">
-            <h5>Payment History</h5>
-            <canvas id="paymentChart" height="100"></canvas>
+    <div class="col-md-3 col-6 mb-3">
+        <div class="card p-3 text-center bg-danger text-white">
+            <div>Outstanding</div>
+            <div class="metric-value">₱<?= number_format($outstanding_balance,2); ?></div>
         </div>
     </div>
 
-    <!-- Recent Payments Card -->
-    <div class="card shadow-sm">
-        <div class="card-body">
-            <h5>Recent Payments</h5>
-            <div class="table-responsive">
-                <table class="table table-bordered table-striped align-middle" id="paymentsTable">
-                    <thead class="table-dark">
-                        <tr>
-                            <th>Date</th>
-                            <th>Amount Paid</th>
-                            <th>Discount</th>
-                            <th>Penalty</th>
-                            <th>Total</th>
-                            <th>Receipt</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($payments as $p): ?>
-                        <tr>
-                            <td><?= htmlspecialchars($p['payment_date']); ?></td>
-                            <td>₱<?= number_format($p['amount_paid'],2); ?></td>
-                            <td>₱<?= number_format($p['discount'],2); ?></td>
-                            <td>₱<?= number_format($p['penalty'],2); ?></td>
-                            <td>₱<?= number_format($p['amount_paid'] - $p['discount'] + $p['penalty'],2); ?></td>
-                            <td><a href="vendor_receipt.php?id=<?= $p['id']; ?>" target="_blank" class="btn btn-sm btn-primary">Print</a></td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
+    <div class="col-md-3 col-6 mb-3">
+        <div class="card p-3 text-center bg-<?= $statusClass ?> text-white">
+            <div>Status</div>
+            <div class="metric-value"><?= $statusLabel ?></div>
+            <small>Next Due: <?= $nextDueDate->format('M d, Y'); ?></small>
         </div>
     </div>
-
 </div>
 
+<!-- ================= CHARTS ================= -->
+<div class="card mb-4 p-4">
+    <h5>Payment Overview</h5>
+    <div class="row">
+        <div class="col-md-8">
+            <canvas id="paymentChart"></canvas>
+        </div>
+        <div class="col-md-4">
+            <canvas id="balancePie"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- ================= PAYMENT TABLE ================= -->
+<div class="card p-4">
+<h5>Payment History</h5>
+
+<table class="table table-bordered align-middle">
+<thead class="table-dark">
+<tr>
+    <th>Date</th>
+    <th>Paid</th>
+    <th>Discount</th>
+    <th>Penalty</th>
+    <th>Total</th>
+    <th>Receipt</th>
+</tr>
+</thead>
+<tbody>
+<?php foreach($payments as $p): ?>
+<tr class="<?= $isOverdue ? 'table-danger':'' ?>">
+    <td><?= $p['payment_date']; ?></td>
+    <td>₱<?= number_format($p['amount_paid'],2); ?></td>
+    <td>₱<?= number_format($p['discount'],2); ?></td>
+    <td>₱<?= number_format($p['penalty'],2); ?></td>
+    <td>
+        ₱<?= number_format($p['amount_paid'] - $p['discount'] + $p['penalty'],2); ?>
+        <?php if($outstanding_balance>0): ?>
+            <span class="badge bg-warning">Partial</span>
+        <?php endif; ?>
+    </td>
+    <td>
+        <a href="vendor_receipt.php?id=<?= $p['id']; ?>" target="_blank" class="btn btn-sm btn-outline-primary">
+            Print
+        </a>
+    </td>
+</tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+
+<!-- MOBILE VIEW -->
+<div class="mobile-payment">
+<?php foreach($payments as $p): ?>
+<div class="card mb-2">
+<div class="card-body">
+<strong><?= date('M d, Y',strtotime($p['payment_date'])) ?></strong>
+<div>Total: ₱<?= number_format($p['amount_paid']-$p['discount']+$p['penalty'],2) ?></div>
+</div>
+</div>
+<?php endforeach; ?>
+</div>
+
+</div>
+</div>
+
+<!-- ================= OVERDUE POPUP ================= -->
+<?php if($isOverdue): ?>
+<div class="modal fade" id="overdueModal">
+<div class="modal-dialog modal-dialog-centered">
+<div class="modal-content border-danger">
+<div class="modal-header bg-danger text-white">
+<h5>⚠ Payment Overdue</h5>
+</div>
+<div class="modal-body">
+<p>Your rent payment is overdue.</p>
+<p><strong>Next Due:</strong> <?= $nextDueDate->format('M d, Y'); ?></p>
+</div>
+<div class="modal-footer">
+<button class="btn btn-danger" data-bs-dismiss="modal">OK</button>
+</div>
+</div>
+</div>
+</div>
+<?php endif; ?>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 <script>
-// --- Live total calculation ---
-function calcTotal() {
-    let amt = parseFloat($('#amount_paid').val()) || 0;
-    let disc = parseFloat($('#discount').val()) || 0;
-    let pen = parseFloat($('#penalty').val()) || 0;
-    $('#totalCalc').text((amt - disc + pen).toFixed(2));
-}
-$('#amount_paid, #discount, #penalty').on('input', calcTotal);
-calcTotal();
+<?php if($isOverdue): ?>
+new bootstrap.Modal(document.getElementById('overdueModal')).show();
+<?php endif; ?>
 
-// --- AJAX Payment Submission ---
-$('#paymentForm').on('submit', function(e){
-    e.preventDefault();
-    const data = $(this).serialize();
-    $.post('vendor_api.php', data, function(response){
-        $('#paymentMsg').html('<div class="alert alert-success">Payment submitted! Printing receipt...</div>');
-
-        // Open receipt
-        window.open('vendor_receipt.php?id=' + response.payment_id, '_blank');
-
-        // Reload payments table
-        $.get('vendor_api.php?action=get_payments', function(paymentsHtml){
-            $('#paymentsTable tbody').html(paymentsHtml);
-        });
-
-        // Update outstanding balance and chart
-        $.getJSON('vendor_api.php?action=get_balance', function(balance){
-            $('#outstandingBalance').text('₱'+parseFloat(balance.outstanding).toFixed(2));
-            $('#totalCalc').text('0.00');
-
-            // Update chart
-            paymentChart.data.datasets[0].data.push(balance.latest_payment);
-            paymentChart.data.labels.push(balance.latest_date);
-            paymentChart.update();
-        });
-
-        $('#paymentForm')[0].reset();
-    }, 'json');
+new Chart(document.getElementById('paymentChart'), {
+    type:'bar',
+    data:{
+        labels: <?= json_encode($payment_dates); ?>,
+        datasets:[{
+            data: <?= json_encode($payment_amounts); ?>,
+            backgroundColor:'#0d6efd'
+        }]
+    }
 });
 
-// --- Chart ---
-const ctx = document.getElementById('paymentChart').getContext('2d');
-const paymentChart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-        labels: <?= json_encode($payment_dates); ?>,
-        datasets: [{
-            label: 'Payment Amount (₱)',
-            data: <?= json_encode($payment_amounts); ?>,
-            backgroundColor: 'rgba(54, 162, 235, 0.7)',
-            borderColor: 'rgba(54, 162, 235, 1)',
-            borderWidth: 1,
-            borderRadius: 5
+new Chart(document.getElementById('balancePie'), {
+    type:'pie',
+    data:{
+        labels:['Paid','Outstanding'],
+        datasets:[{
+            data:[<?= $total_paid ?>,<?= $outstanding_balance ?>],
+            backgroundColor:['#198754','#dc3545']
         }]
-    },
-    options: {
-        responsive: true,
-        plugins: { legend: { display: false } },
-        scales: {
-            x: { title: { display: true, text: 'Payment Date' } },
-            y: { beginAtZero: true, title: { display: true, text: 'Amount (₱)' } }
-        }
     }
 });
 </script>
+
 </body>
 </html>

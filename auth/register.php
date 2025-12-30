@@ -9,29 +9,40 @@ $success = "";
 $role = 'collector';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $first_name = trim($_POST['first_name']);
-    $last_name = trim($_POST['last_name']);
-    $email = trim($_POST['email']);
-    $password = $_POST['password'];
 
-    // Check if email already exists
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE email=? LIMIT 1");
-    $stmt->execute([$email]);
-    if ($stmt->rowCount() > 0) {
-        $error = "Email is already registered.";
+    // --- Sanitize input ---
+    $first_name = trim($_POST['first_name'] ?? '');
+    $last_name  = trim($_POST['last_name'] ?? '');
+    $email      = filter_var(trim($_POST['email'] ?? ''), FILTER_VALIDATE_EMAIL);
+    $password   = $_POST['password'] ?? '';
+
+    // --- Validate ---
+    if (!$first_name || !$last_name || !$email || !$password) {
+        $error = "All fields are required and email must be valid.";
     } else {
-        // Hash password
-        $hashed = password_hash($password, PASSWORD_DEFAULT);
+        // Check if email already exists
+        $stmt = $pdo->prepare("SELECT id FROM users WHERE email = ? LIMIT 1");
+        $stmt->execute([$email]);
 
-        // Insert user as collector
-        $insert = $pdo->prepare("INSERT INTO users (role, first_name, last_name, email, password, status, created_at)
-                                 VALUES (?, ?, ?, ?, ?, 'active', NOW())");
-        $insert->execute([$role, $first_name, $last_name, $email, $hashed]);
+        if ($stmt->rowCount() > 0) {
+            $error = "Email is already registered.";
+        } else {
+            // Hash password
+            $hashed = password_hash($password, PASSWORD_DEFAULT);
 
-        $success = "Collector registration successful! You can now log in.";
+            // Insert collector
+            $insert = $pdo->prepare("
+                INSERT INTO users (role, first_name, last_name, email, password, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'active', NOW())
+            ");
+            $insert->execute([$role, $first_name, $last_name, $email, $hashed]);
+
+            $success = "Collector registration successful! You can now log in.";
+        }
     }
 }
 ?>
+
 
 <!DOCTYPE html>
 <html lang="en">
